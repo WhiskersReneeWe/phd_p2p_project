@@ -1,0 +1,181 @@
+---
+title: "NET Grant Proposal"
+author: "Renee Liu"
+date: "May 11, 2018"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+
+# Lending Club Preliminary Result
+
+
+```{r message = FALSE, error = FALSE, echo = FALSE}
+library(dplyr)
+library(mfx)
+library(tidyr)
+library(plyr)
+library(ggplot2)
+library(lubridate)
+library(stargazer)
+```
+
+## What makes a borrower more likely to be rejected by Lending Club? The one with higher loan request?
+First, we combine `rejected` and `accepted` loans to see what is the relationship between loan acceptance status and other charateristics associated with a specific loan. We need to run a logistic model to look at the sign on the amount of loan requested.
+
+$$approved status_{i} = \alpha Amount of Loan Request_{i} + \beta fico_{i} + \gamma dti_{i}$$
+
+```{r pooled, echo = FALSE}
+#read data
+rej = read.csv("rejectedloans.csv")
+rej <- rej %>% 
+       separate(Application.Date, c("day", "Month", "Year"), sep = "-") %>%
+       select(-c(Month, day, Loan.Title, City, State))
+
+#declare logical variable in rej
+status = seq(0,0,length.out= nrow(rej))
+rej = cbind(rej, status)
+
+appr = read.csv("approvedloans.csv")
+appr[, 6] = as.numeric(gsub("%", "", appr[,6]))/100
+appr1 <- appr %>%
+         na.omit() %>%
+         select(issue_d, int_rate, loan_amnt, funded_amnt_inv, term, grade, sub_grade, emp_length, home_ownership, annual_inc, dti, fico_range_low, fico_range_high, inq_last_6mths, open_acc, revol_util) %>%
+         mutate(fico = (fico_range_low + fico_range_high)/2) %>%
+         separate(issue_d, c("month", "year"), sep = ",") 
+
+for(level in unique(appr1$emp_length)){
+  appr1[paste("dummy", level, sep = "_")] <- ifelse(appr1$emp_length == level, 1, 0)
+} # Creat dummy variable for employment length
+
+apprj <- appr1 %>%
+         select(loan_amnt, year, fico, dti, emp_length)
+
+approved_status = seq(1,1,length.out= nrow(apprj))
+apprj = cbind(apprj, approved_status)
+
+names(rej) <- colnames(apprj)
+rej$dti = as.numeric(sub("%", "", rej$dti))
+pooled = rbind(apprj, rej)
+pooled <- pooled %>% drop_na()
+pooled$approved_status <- as.factor(pooled$approved_status)
+pooled <- droplevels(pooled[!pooled$emp_length == 'n/a',])
+pooled_drop1 <- droplevels(pooled[!pooled$emp_length == '< 1 year',])
+pooled_dropped_both <- droplevels(pooled_drop1[!pooled_drop1$emp_length == '10+ years',])
+
+#pooled_dropped_both resulted from dropped less than 1 year and more than 10 years emp_length
+#not a good way though
+pooled_dropped_both$emp_length <- as.character(pooled_dropped_both$emp_length)
+
+p1 <- pooled_dropped_both %>%
+  separate(emp_length, c("emp_length", "del") , sep = " ") %>%
+  select(-del)
+
+p1$emp_length <- as.numeric(p1$emp_length)
+p1$emp_length <- log(p1$emp_length)
+p1$loan_amnt <- log(p1$loan_amnt)
+p1$fico <- log(p1$fico)
+
+#from now on use p1 to do logistic regression
+
+#pooled$year = year(pooled$year, origin = "2000-01-01")
+#pooled$year = as.character.Date(pooled$year)
+#pooled$year = year(pooled$year)
+#pooled$year = as.numeric(pooled$year)
+#pooled$year[pooled$year < 30] = pooled$year + 2000
+
+
+#fit a logistic regression to test H_0: Higher Amount of Loan request is more likely to be rejected
+#Ignoring employment length first
+approval_decision_model = glm(approved_status ~ loan_amnt + fico + dti + emp_length, data = p1, family = binomial(link = "logit"))
+#stargazer(approval_decision_model, title = "Logistic Regression Results", align = TRUE)
+# This produce log odds ratio instead of the direct coef outputs
+logit.or = exp(coef(approval_decision_model))
+stargazer(approval_decision_model, title = "Logistic Regression Results (log odds ratio)", coef=list(logit.or), p.auto=FALSE, out="logitor.htm")
+
+summary(approval_decision_model)
+
+#summary(approval_decision_model)$coefficients
+#alpha = summary(approval_decision_model)$coefficients[2,1]
+
+#Mcfadden's pseudo R-squared
+ll.null <- approval_decision_model$null.deviance/-2
+ll.proposed <- approval_decision_model$deviance/-2
+pseudo_R_2 = (ll.null - ll.proposed) / ll.null
+
+#P-value for pseudo R squared
+1 - pchisq(2*(ll.proposed - ll.null),df = (length(approval_decision_model$coefficients)-1))
+
+# marginal effects
+logitmfx(approved_status ~ loan_amnt + fico + dti + emp_length, data = p1)
+
+```
+
+```{r}
+# Define function - multiplot
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+We see that the coefficient on loan amount reqeusted is `r alpha`, and it is negative with statistical significance.
+Within the rejected data, we see that most of 
+```{r}
+g_rej <- ggplot(rej, aes(emp_length))
+emp_rej = g_rej + geom_bar() + scale_y_continuous(labels=function(n){format(n, scientific = FALSE)}) + xlab("Employment Length (Rejected Loans)")
+g_apprj <- ggplot(apprj, aes(emp_length))
+emp_apprj = g_apprj + geom_bar() + xlab("Employment Length (Approved Loans)")
+multiplot(emp_rej, emp_apprj, cols=1)
+```
+The left and right panel shows the distribution of employment length from Rejected and Accepted data. It shows that most of the people with less-than-one-year of working got screened out by LC. This shows that LC cares a lot about borrowers' qualities.
+
+```{r}
+# fico density plots from rejected and approved loans 
+# rejected
+
+rejf = ggplot(subset(rej, !is.na(fico)), aes(x = fico))
+a = rejf + geom_density(fill = "white") + geom_vline(aes(xintercept = mean(fico)), 
+                                     linetype = "dashed", size = 0.6) + xlab("Fico Scores (Rejected Loans)")
+# accepted
+accf = ggplot(subset(apprj, !is.na(fico)), aes(x = fico))
+b = accf + geom_density(fill = "lightgray") + geom_vline(aes(xintercept = mean(fico)), 
+                                       linetype = "dashed", size = 0.6) + xlab("Fico Scores (Approved Loans)")
+multiplot(a, b, cols=1)
+
+
+```
